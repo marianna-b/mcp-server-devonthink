@@ -187,6 +187,80 @@ describe("identification", () => {
 		}
 	});
 
+	it("lookupRecord_item_url — looks up email by percent-encoded x-devonthink-item URL", async () => {
+		const ctx = getTestContext();
+
+		// Import an .eml file — DEVONthink assigns a referenceURL with a percent-encoded
+		// message-ID (not a UUID), e.g. x-devonthink-item://%3Csome-id%40host%3E
+		const emlPath = ctx.emlPath;
+		expect(fs.existsSync(emlPath)).toBe(true);
+
+		const importResult = await jxa<{
+			success: boolean;
+			referenceURL?: string;
+			uuid?: string;
+			error?: string;
+		}>(`
+      const db = theApp.getDatabaseWithUuid("${ctx.dbUuid}");
+      if (!db) throw new Error("Temp database not found");
+      const imported = theApp.importPath(${JSON.stringify(emlPath)}, { to: db.root() });
+      if (!imported || !imported.exists()) throw new Error("Import failed");
+      const r = {};
+      r["success"] = true;
+      r["referenceURL"] = imported.referenceURL();
+      r["uuid"] = imported.uuid();
+      return JSON.stringify(r);
+    `);
+		expect(importResult.success).toBe(true);
+		expect(importResult.referenceURL).toBeTruthy();
+
+		try {
+			const refURL = importResult.referenceURL!;
+
+			// Verify it's a percent-encoded item URL (not a plain UUID-based one)
+			expect(refURL).toContain("%");
+			expect(refURL).toMatch(/^x-devonthink-item:\/\//);
+
+			// Bug: passing this item URL to lookupRecordsWithURL returns 0 results because
+			// that API searches the "url" property, not "referenceURL". The fix detects
+			// x-devonthink-item:// URLs, decodes the identifier, and uses getRecordWithUuid.
+			const lookupResult = await jxa<{
+				success: boolean;
+				found?: boolean;
+				matchUuid?: string;
+				error?: string;
+			}>(`
+        const urlValue = ${JSON.stringify(refURL)};
+        const dtPrefix = "x-devonthink-item://";
+        let searchResults;
+        if (urlValue.startsWith(dtPrefix)) {
+          const identifier = decodeURIComponent(urlValue.substring(dtPrefix.length));
+          const record = theApp.getRecordWithUuid(identifier);
+          if (record && record.exists()) {
+            searchResults = [record];
+          } else {
+            searchResults = [];
+          }
+        } else {
+          const db = theApp.getDatabaseWithUuid("${ctx.dbUuid}");
+          searchResults = theApp.lookupRecordsWithURL(decodeURIComponent(urlValue), { in: db });
+        }
+        const r = {};
+        r["success"] = true;
+        r["found"] = searchResults.length > 0;
+        if (searchResults.length > 0) {
+          r["matchUuid"] = searchResults[0].uuid();
+        }
+        return JSON.stringify(r);
+      `);
+			expect(lookupResult.success).toBe(true);
+			expect(lookupResult.found).toBe(true);
+			expect(lookupResult.matchUuid).toBe(importResult.uuid);
+		} finally {
+			await deleteRecord(importResult.uuid!);
+		}
+	});
+
 	it("search — finds records by name prefix", async () => {
 		const ctx = getTestContext();
 		const rec1 = await createTestRecord(ctx, "SearchReg-Alpha", "markdown", "# Alpha");
